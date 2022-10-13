@@ -70,7 +70,7 @@ import qualified Data.Functor.Product as Functor (Product)
 import qualified Data.Functor.Sum as Functor (Sum)
 import           Data.List.NonEmpty (NonEmpty)
 import qualified Data.Semigroup as Semigroup (First, Last)
-import           Data.Semigroup (Arg, Max, Min, WrappedMonoid)
+import           Data.Semigroup (Arg, Max, Min, Option, WrappedMonoid)
 #endif
 
 --------------------------------------------------------------------------------
@@ -213,6 +213,9 @@ instance GTraversable Min where
   gtraverse = gtraversedefault
 
 instance GTraversable NonEmpty where
+  gtraverse = gtraversedefault
+
+instance GTraversable Option where
   gtraverse = gtraversedefault
 #endif
 

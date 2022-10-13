@@ -1,22 +1,3 @@
-# 1.14.2 [2022.07.23]
-* Fix a bug in which `deriveAll1` could generate ill kinded code when using
-  `kindSigOptions=False`, or when using GHC 8.0 or earlier.
-* Fix a bug in which `deriveAll1` would reject data types whose last type
-  variable has a kind besides `Type` or `k` on GHC 8.2 or later.
-
-# 1.14.1 [2021.08.30]
-* Backport the `Generic(1)` instances introduced for tuples (8 through 15) in
-  `base-4.16`.
-* Make the test suite compile on GHC 9.2 or later.
-* Always import `Data.List` qualified to fix the build with recent GHCs.
-
-# 1.14 [2020.09.30]
-* Remove instances for `Data.Semigroup.Option`, which is deprecated as of
-  `base-4.15.0.0`.
-* Allow building with `template-haskell-2.17.0.0` (GHC 9.0).
-* Fix a bug in which `deriveAll1` would needlessly reject data types whose last
-  type parameter appears as an oversaturated argument to a type family.
-
 # 1.13.1 [2019.11.26]
 * Backport the `Generic(1)` instances for `Kleisli` introduced in `base-4.14`.
 

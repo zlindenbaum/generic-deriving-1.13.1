@@ -68,7 +68,7 @@ import           Numeric.Natural (Natural)
 #if MIN_VERSION_base(4,9,0)
 import           Data.List.NonEmpty (NonEmpty)
 import qualified Data.Semigroup as Semigroup (First, Last)
-import           Data.Semigroup (Arg, Max, Min, WrappedMonoid)
+import           Data.Semigroup (Arg, Max, Min, Option, WrappedMonoid)
 #endif
 
 --------------------------------------------------------------------------------
@@ -539,6 +539,9 @@ instance GShow Natural where
 
 #if MIN_VERSION_base(4,9,0)
 instance GShow a => GShow (NonEmpty a) where
+  gshowsPrec = gshowsPrecdefault
+
+instance GShow a => GShow (Option a) where
   gshowsPrec = gshowsPrecdefault
 #endif
 

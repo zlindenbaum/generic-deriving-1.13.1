@@ -189,6 +189,9 @@ instance Ord a => GSemigroup (Min a) where
 
 instance GSemigroup (NonEmpty a) where
   gsappend = (<>)
+
+instance GSemigroup a => GSemigroup (Option a) where
+  gsappend (Option a) (Option b) = Option (gsappend a b)
 #endif
 
 -- Tuple instances

@@ -1,4 +1,3 @@
-{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 
 {- |
@@ -19,7 +18,7 @@ import           Control.Monad (unless)
 
 import           Data.Char (isAlphaNum, ord)
 import           Data.Foldable (foldr')
-import qualified Data.List as List
+import           Data.List
 import qualified Data.Map as Map
 import           Data.Map as Map (Map)
 import           Data.Maybe (mapMaybe)
@@ -27,7 +26,6 @@ import qualified Data.Set as Set
 import           Data.Set (Set)
 
 import           Language.Haskell.TH.Datatype
-import           Language.Haskell.TH.Datatype.TyVarBndr
 import           Language.Haskell.TH.Lib
 import           Language.Haskell.TH.Ppr (pprint)
 import           Language.Haskell.TH.Syntax
@@ -60,15 +58,10 @@ substNamesWithKindStar ns t = foldr' (flip substNameWithKind starK) t ns
 -- StarKindStatus
 -------------------------------------------------------------------------------
 
--- | Whether a type is of kind @*@, a kind variable, or some other kind. The
--- kind variable case is given special treatment solely to support GHC 8.0 and
--- earlier, in which Generic1 was not poly-kinded. In order to support deriving
--- Generic1 instances on these versions of GHC, we must substitute such kinds
--- with @*@ to ensure that the resulting instance is well kinded.
--- See @Note [Generic1 is polykinded in base-4.10]@ in "Generics.Deriving.TH".
-data StarKindStatus = KindStar
+-- | Whether a type is not of kind *, is of kind *, or is a kind variable.
+data StarKindStatus = NotKindStar
+                    | KindStar
                     | IsKindVar Name
-                    | OtherKind
   deriving Eq
 
 -- | Does a Type have kind * or k (for some kind variable k)?
@@ -79,7 +72,7 @@ canRealizeKindStar t
 #if MIN_VERSION_template_haskell(2,8,0)
                      SigT _ (VarT k) -> IsKindVar k
 #endif
-                     _               -> OtherKind
+                     _               -> NotKindStar
 
 -- | Returns 'Just' the kind variable 'Name' of a 'StarKindStatus' if it exists.
 -- Otherwise, returns 'Nothing'.
@@ -108,9 +101,9 @@ hasKindStar _              = False
 
 -- | Converts a VarT or a SigT into Just the corresponding TyVarBndr.
 -- Converts other Types to Nothing.
-typeToTyVarBndr :: Type -> Maybe TyVarBndrUnit
-typeToTyVarBndr (VarT n)          = Just (plainTV n)
-typeToTyVarBndr (SigT (VarT n) k) = Just (kindedTV n k)
+typeToTyVarBndr :: Type -> Maybe TyVarBndr
+typeToTyVarBndr (VarT n)          = Just (PlainTV n)
+typeToTyVarBndr (SigT (VarT n) k) = Just (KindedTV n k)
 typeToTyVarBndr _                 = Nothing
 
 -- | If a Type is a SigT, returns its kind signature. Otherwise, return *.
@@ -150,73 +143,59 @@ makeFunKind = makeFunType
 makeFunKind argKinds resKind = foldr' ArrowK resKind argKinds
 #endif
 
--- | Remove any outer `SigT` and `ParensT` constructors, and turn
--- an outermost `InfixT` constructor into plain applications.
-dustOff :: Type -> Type
-dustOff (SigT ty _) = dustOff ty
+-- | Is the given type a type family constructor (and not a data family constructor)?
+isTyFamily :: Type -> Q Bool
+isTyFamily (ConT n) = do
+    info <- reify n
+    return $ case info of
 #if MIN_VERSION_template_haskell(2,11,0)
-dustOff (ParensT ty) = dustOff ty
-dustOff (InfixT ty1 n ty2) = ConT n `AppT` ty1 `AppT` ty2
-#endif
-dustOff ty = ty
-
--- | Checks whether a type is an unsaturated type family
--- application.
-isUnsaturatedType :: Type -> Q Bool
-isUnsaturatedType = go 0 . dustOff
-  where
-    -- Expects its argument to be dusted
-    go :: Int -> Type -> Q Bool
-    go d t = case t of
-      ConT tcName -> check d tcName
-      AppT f _ -> go (d + 1) (dustOff f)
-      _ -> return False
-
-    check :: Int -> Name -> Q Bool
-    check d tcName = do
-      mbinders <- getTypeFamilyBinders tcName
-      return $ case mbinders of
-        Just bndrs -> length bndrs > d
-        Nothing -> False
-
--- | Given a name, check if that name is a type family. If
--- so, return a list of its binders.
-getTypeFamilyBinders :: Name -> Q (Maybe [TyVarBndr_ ()])
-getTypeFamilyBinders tcName = do
-      info <- reify tcName
-      return $ case info of
-#if MIN_VERSION_template_haskell(2,11,0)
-        FamilyI (OpenTypeFamilyD (TypeFamilyHead _ bndrs _ _)) _
-          -> Just bndrs
+         FamilyI OpenTypeFamilyD{} _       -> True
 #elif MIN_VERSION_template_haskell(2,7,0)
-        FamilyI (FamilyD TypeFam _ bndrs _) _
-          -> Just bndrs
+         FamilyI (FamilyD TypeFam _ _ _) _ -> True
 #else
-        TyConI (FamilyD TypeFam _ bndrs _)
-          -> Just bndrs
+         TyConI  (FamilyD TypeFam _ _ _)   -> True
 #endif
-
-#if MIN_VERSION_template_haskell(2,11,0)
-        FamilyI (ClosedTypeFamilyD (TypeFamilyHead _ bndrs _ _) _) _
-          -> Just bndrs
-#elif MIN_VERSION_template_haskell(2,9,0)
-        FamilyI (ClosedTypeFamilyD _ bndrs _ _) _
-          -> Just bndrs
+#if MIN_VERSION_template_haskell(2,9,0)
+         FamilyI ClosedTypeFamilyD{} _     -> True
 #endif
-
-        _ -> Nothing
+         _ -> False
+isTyFamily _ = return False
 
 -- | True if the type does not mention the Name
 ground :: Type -> Name -> Bool
-ground ty name = name `notElem` freeVariables ty
+ground (AppT t1 t2) name = ground t1 name && ground t2 name
+ground (SigT t _)   name = ground t name
+ground (VarT t)     name = t /= name
+ground ForallT{}    _    = rankNError
+ground _            _    = True
 
 -- | Construct a type via curried application.
 applyTyToTys :: Type -> [Type] -> Type
-applyTyToTys = List.foldl' AppT
+applyTyToTys = foldl' AppT
 
 -- | Apply a type constructor name to type variable binders.
-applyTyToTvbs :: Name -> [TyVarBndr_ flag] -> Type
-applyTyToTvbs = List.foldl' (\a -> AppT a . tyVarBndrToType) . ConT
+applyTyToTvbs :: Name -> [TyVarBndr] -> Type
+applyTyToTvbs = foldl' (\a -> AppT a . tyVarBndrToType) . ConT
+
+-- | Split an applied type into its individual components. For example, this:
+--
+-- @
+-- Either Int Char
+-- @
+--
+-- would split to this:
+--
+-- @
+-- [Either, Int, Char]
+-- @
+unapplyTy :: Type -> [Type]
+unapplyTy = reverse . go
+  where
+    go :: Type -> [Type]
+    go (AppT t1 t2)    = t2 : go t1
+    go (SigT t _)      = go t
+    go (ForallT _ _ t) = go t
+    go t               = [t]
 
 -- | Split a type signature by the arrows on its spine. For example, this:
 --
@@ -229,7 +208,7 @@ applyTyToTvbs = List.foldl' (\a -> AppT a . tyVarBndrToType) . ConT
 -- @
 -- ([a, b], [a -> b, Char, ()])
 -- @
-uncurryTy :: Type -> ([TyVarBndrSpec], [Type])
+uncurryTy :: Type -> ([TyVarBndr], [Type])
 uncurryTy (AppT (AppT ArrowT t1) t2) =
   let (tvbs, tys) = uncurryTy t2
   in (tvbs, t1:tys)
@@ -240,7 +219,7 @@ uncurryTy (ForallT tvbs _ t) =
 uncurryTy t = ([], [t])
 
 -- | Like uncurryType, except on a kind level.
-uncurryKind :: Kind -> ([TyVarBndrSpec], [Kind])
+uncurryKind :: Kind -> ([TyVarBndr], [Kind])
 #if MIN_VERSION_template_haskell(2,8,0)
 uncurryKind = uncurryTy
 #else
@@ -250,8 +229,9 @@ uncurryKind (ArrowK k1 k2) =
 uncurryKind k = ([], [k])
 #endif
 
-tyVarBndrToType :: TyVarBndr_ flag -> Type
-tyVarBndrToType = elimTV VarT (\n k -> SigT (VarT n) k)
+tyVarBndrToType :: TyVarBndr -> Type
+tyVarBndrToType (PlainTV n)    = VarT n
+tyVarBndrToType (KindedTV n k) = SigT (VarT n) k
 
 -- | Generate a list of fresh names with a common prefix, and numbered suffixes.
 newNameList :: String -> Int -> Q [Name]
@@ -314,8 +294,9 @@ unSigT (SigT t _) = t
 unSigT t          = t
 
 -- | Peel off a kind signature from a TyVarBndr (if it has one).
-unKindedTV :: TyVarBndrUnit -> TyVarBndrUnit
-unKindedTV tvb = elimTV (\_ -> tvb) (\n _ -> plainTV n) tvb
+unKindedTV :: TyVarBndr -> TyVarBndr
+unKindedTV (KindedTV n _) = PlainTV n
+unKindedTV tvb            = tvb
 
 -- | Does the given type mention any of the Names in the list?
 mentionsName :: Type -> [Name] -> Bool
@@ -355,17 +336,10 @@ shrink :: (a, b, c) -> (b, c)
 shrink (_, b, c) = (b, c)
 
 foldBal :: (a -> a -> a) -> a -> [a] -> a
-{-# INLINE foldBal #-} -- inlined to produce specialised code for each op
-foldBal op0 x0 xs0 = fold_bal op0 x0 (length xs0) xs0
-  where
-    fold_bal op x !n xs = case xs of
-      []  -> x
-      [a] -> a
-      _   -> let !nl = n `div` 2
-                 !nr = n - nl
-                 (l,r) = splitAt nl xs
-             in fold_bal op x nl l
-                `op` fold_bal op x nr r
+foldBal _  x []  = x
+foldBal _  _ [y] = y
+foldBal op x l   = let (a,b) = splitAt (length l `div` 2) l
+                   in foldBal op x a `op` foldBal op x b
 
 isNewtypeVariant :: DatatypeVariant_ -> Bool
 isNewtypeVariant Datatype_             = False
@@ -376,40 +350,22 @@ isNewtypeVariant (NewtypeInstance_ {}) = True
 -- | Indicates whether Generic or Generic1 is being derived.
 data GenericClass = Generic | Generic1 deriving Enum
 
--- | Records information about the type variables of a data type with a
--- 'Generic' or 'Generic1' instance.
-data GenericTvbs
-    -- | Information about a data type with a 'Generic' instance.
-  = Gen0
-      { gen0Tvbs :: [TyVarBndrUnit]
-        -- ^ All of the type variable arguments to the data type.
-      }
-    -- | Information about a data type with a 'Generic1' instance.
-  | Gen1
-      { gen1InitTvbs :: [TyVarBndrUnit]
-        -- ^ All of the type variable arguments to the data type except the
-        --   last one. In a @'Generic1' (T a_1 ... a_(n-1))@ instance, the
-        --   'gen1InitTvbs' would be @[a_1, ..., a_(n-1)]@.
-      , gen1LastTvbName :: Name
-        -- ^ The name of the last type variable argument to the data type.
-        --   In a @'Generic1' (T a_1 ... a_(n-1))@ instance, the
-        --   'gen1LastTvbName' name would be @a_n@.
-     , gen1LastTvbKindVar :: Maybe Name
-        -- ^ If the 'gen1LastTvbName' has kind @k@, where @k@ is some kind
-        --   variable, then the 'gen1LastTvbKindVar' is @'Just' k@. Otherwise,
-        --   the 'gen1LastTvbKindVar' is 'Nothing'.
-      }
+-- | Like 'GenericArity', but bundling two things in the 'Gen1' case:
+--
+-- 1. The 'Name' of the last type parameter.
+-- 2. If that last type parameter had kind k (where k is some kind variable),
+--    then it has 'Just' the kind variable 'Name'. Otherwise, it has 'Nothing'.
+data GenericKind = Gen0
+                 | Gen1 Name (Maybe Name)
 
--- | Compute 'GenericTvbs' from a 'GenericClass' and the type variable
--- arguments to a data type.
-mkGenericTvbs :: GenericClass -> [Type] -> GenericTvbs
-mkGenericTvbs gClass tySynVars =
+-- Determines the universally quantified type variables (possibly after
+-- substituting * in the case of Generic1) and the last type parameter name
+-- (if there is one).
+genericKind :: GenericClass -> [Type] -> ([TyVarBndr], GenericKind)
+genericKind gClass tySynVars =
   case gClass of
-    Generic  -> Gen0{gen0Tvbs = freeVariablesWellScoped tySynVars}
-    Generic1 -> Gen1{ gen1InitTvbs       = freeVariablesWellScoped initArgs
-                    , gen1LastTvbName    = varTToName lastArg
-                    , gen1LastTvbKindVar = mbLastArgKindName
-                    }
+    Generic  -> (freeVariablesWellScoped tySynVars, Gen0)
+    Generic1 -> (freeVariablesWellScoped initArgs, Gen1 (varTToName lastArg) mbLastArgKindName)
   where
     -- Everything below is only used for Generic1.
     initArgs :: [Type]
@@ -421,14 +377,6 @@ mkGenericTvbs gClass tySynVars =
     mbLastArgKindName :: Maybe Name
     mbLastArgKindName = starKindStatusToName
                       $ canRealizeKindStar lastArg
-
--- | Return the type variable arguments to a data type that appear in a
--- 'Generic' or 'Generic1' instance. For a 'Generic' instance, this consists of
--- all the type variable arguments. For a 'Generic1' instance, this consists of
--- all the type variable arguments except for the last one.
-genericInitTvbs :: GenericTvbs -> [TyVarBndrUnit]
-genericInitTvbs (Gen0{gen0Tvbs = tvbs})     = tvbs
-genericInitTvbs (Gen1{gen1InitTvbs = tvbs}) = tvbs
 
 -- | A version of 'DatatypeVariant' in which the data family instance
 -- constructors come equipped with the 'ConstructorInfo' of the first
@@ -486,34 +434,17 @@ derivingKindError tyConName = fail
     ( showString (nameBase tyConName)
     . showString " ..."
     )
-  . showString "‘\n\tClass Generic1 expects an argument of kind "
-#if MIN_VERSION_base(4,10,0)
-  . showString "k -> *"
-#else
-  . showString "* -> *"
-#endif
+  . showString "‘\n\tClass Generic1 expects an argument of kind * -> *"
   $ ""
 
--- | The data type mentions the last type variable in a place other
--- than the last position of a data type in a constructor's field.
 outOfPlaceTyVarError :: Q a
 outOfPlaceTyVarError = fail
-  . showString "Constructor must only use its last type variable as"
-  . showString " the last argument of a data type"
-  $ ""
-
--- | The data type mentions the last type variable in a type family
--- application.
-typeFamilyApplicationError :: Q a
-typeFamilyApplicationError = fail
-  . showString "Constructor must not apply its last type variable"
-  . showString " to an unsaturated type family"
-  $ ""
+    "Type applied to an argument involving the last parameter is not of kind * -> *"
 
 -- | Cannot have a constructor argument of form (forall a1 ... an. <type>)
 -- when deriving Generic(1)
-rankNError :: Q a
-rankNError = fail "Cannot have polymorphic arguments"
+rankNError :: a
+rankNError = error "Cannot have polymorphic arguments"
 
 -- | Boilerplate for top level splices.
 --
@@ -555,7 +486,7 @@ checkDataContext dataName _  _ = fail $
   nameBase dataName ++ " must not have a datatype context"
 
 -- | Deriving Generic(1) doesn't work with ExistentialQuantification or GADTs.
-checkExistentialContext :: Name -> [TyVarBndrUnit] -> Cxt -> Q ()
+checkExistentialContext :: Name -> [TyVarBndr] -> Cxt -> Q ()
 checkExistentialContext conName vars ctxt =
   unless (null vars && null ctxt) $ fail $
     nameBase conName ++ " must be a vanilla data constructor"
@@ -889,6 +820,9 @@ fmapValName = mkNameG_v "base" "GHC.Base" "fmap"
 
 undefinedValName :: Name
 undefinedValName = mkNameG_v "base" "GHC.Err" "undefined"
+
+starKindName :: Name
+starKindName = mkGHCPrimName_tc "GHC.Prim" "*"
 
 decidedLazyDataName :: Name
 decidedLazyDataName = mkGD4'9_d "DecidedLazy"
